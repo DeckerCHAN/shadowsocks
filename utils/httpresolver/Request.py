@@ -21,12 +21,17 @@ class HttpRequest(object):
             if not secondly[i]:
                 continue
             k = secondly[i][:secondly[i].index(b':')]
-            v = secondly[i][secondly[i].index(b':'):]
+            v = secondly[i][secondly[i].index(b':') + 1:]
             self.headers[k] = v
 
     def to_binary(self):
-        stream = b''
-        for header in self.headers:
-            stream.__add__(header)
-        stream.__add__(b'\r\n\r\n')
+        stream = self.request_line
+        stream = stream.__add__(b'\r\n')
+        for key in self.headers.keys():
+            stream = stream.__add__(key)
+            stream = stream.__add__(b':')
+            stream = stream.__add__(self.headers[key])
+            stream = stream.__add__(b'\r\n')
+        stream = stream.__add__(b'\r\n')
+        stream = stream.__add__(self.body)
         return stream
