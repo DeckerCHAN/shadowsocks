@@ -24,7 +24,7 @@ import logging
 import signal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
-from shadowsocks import shell, daemon, eventloop, tcprelay, udprelay, asyncdns
+from shadowsocks import shell, daemon, eventloop, tcprelay, udprelay, asyncdns, TerminalType
 
 
 def main():
@@ -57,8 +57,8 @@ def main():
         a_config['password'] = password
         logging.info("starting server at %s:%d" %
                      (a_config['server'], int(port)))
-        tcp_servers.append(tcprelay.TCPRelay(a_config, dns_resolver, False))
-        udp_servers.append(udprelay.UDPRelay(a_config, dns_resolver, False))
+        tcp_servers.append(tcprelay.TCPRelay(a_config, dns_resolver,  TerminalType.TerminalType.Server))
+        udp_servers.append(udprelay.UDPRelay(a_config, dns_resolver, TerminalType.TerminalType.Server))
 
     def run_server():
         def child_handler(signum, _):

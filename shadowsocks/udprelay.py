@@ -69,7 +69,7 @@ import struct
 import errno
 import random
 
-from shadowsocks import encrypt, eventloop, lru_cache, common, shell
+from shadowsocks import encrypt, eventloop, lru_cache, common, shell, TerminalType
 from shadowsocks.common import parse_header, pack_addr
 
 
@@ -81,9 +81,9 @@ def client_key(a, b, c, d):
 
 
 class UDPRelay(object):
-    def __init__(self, config, dns_resolver, is_local):
+    def __init__(self, config, dns_resolver, terminal_type):
         self._config = config
-        if is_local:
+        if terminal_type == TerminalType.TerminalType.Local:
             self._listen_addr = config['local_address']
             self._listen_port = config['local_port']
             self._remote_addr = config['server']
@@ -97,7 +97,7 @@ class UDPRelay(object):
         self._password = config['password']
         self._method = config['method']
         self._timeout = config['timeout']
-        self._is_local = is_local
+        self._terminal_type = terminal_type
         self._cache = lru_cache.LRUCache(timeout=config['timeout'],
                                          close_callback=self._close_client)
         self._client_fd_to_server_addr = \
@@ -146,7 +146,7 @@ class UDPRelay(object):
         data, r_addr = server.recvfrom(BUF_SIZE)
         if not data:
             logging.debug('UDP handle_server: data is empty')
-        if self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Local:
             frag = common.ord(data[2])
             if frag != 0:
                 logging.warn('drop a message since frag is not 0')
@@ -164,7 +164,7 @@ class UDPRelay(object):
             return
         addrtype, dest_addr, dest_port, header_length = header_result
 
-        if self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Local:
             server_addr, server_port = self._get_a_server()
         else:
             server_addr, server_port = dest_addr, dest_port
@@ -193,7 +193,7 @@ class UDPRelay(object):
             self._sockets.add(client.fileno())
             self._eventloop.add(client, eventloop.POLL_IN)
 
-        if self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Local:
             data = encrypt.encrypt_all(self._password, self._method, 1, data)
             if not data:
                 return
@@ -215,7 +215,7 @@ class UDPRelay(object):
         if not data:
             logging.debug('UDP handle_client: data is empty')
             return
-        if not self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Server:
             addrlen = len(r_addr[0])
             if addrlen > 255:
                 # drop

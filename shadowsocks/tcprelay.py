@@ -7,7 +7,7 @@
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -25,8 +25,11 @@ import struct
 import logging
 import traceback
 import random
+import zlib
+import re
+import utils.httpresolver.Request
 
-from shadowsocks import encrypt, eventloop, shell, common
+from shadowsocks import encrypt, eventloop, shell, common, TerminalType
 from shadowsocks.common import parse_header
 
 # we clear at most TIMEOUTS_CLEAN_SIZE timeouts each time
@@ -47,8 +50,8 @@ CMD_UDP_ASSOCIATE = 3
 # for each connection, we have a TCP Relay Handler to handle the connection
 
 # for each handler, we have 2 sockets:
-#    local:   connected to the client
-#    remote:  connected to remote server
+# local:   connected to the client
+# remote:  connected to remote server
 
 # for each handler, it could be at one of several stages:
 
@@ -76,10 +79,10 @@ STAGE_STREAM = 5
 STAGE_DESTROYED = -1
 
 # for each handler, we have 2 stream directions:
-#    upstream:    from client to server direction
-#                 read local and write to remote
-#    downstream:  from server to client direction
-#                 read remote and write to local
+# upstream:    from client to server direction
+# read local and write to remote
+# downstream:  from server to client direction
+# read remote and write to local
 
 STREAM_UP = 0
 STREAM_DOWN = 1
@@ -95,7 +98,7 @@ BUF_SIZE = 32 * 1024
 
 class TCPRelayHandler(object):
     def __init__(self, server, fd_to_handlers, loop, local_sock, config,
-                 dns_resolver, is_local):
+                 dns_resolver, terminal_type):
         self._server = server
         self._fd_to_handlers = fd_to_handlers
         self._loop = loop
@@ -106,7 +109,7 @@ class TCPRelayHandler(object):
 
         # TCP Relay works as either sslocal or ssserver
         # if is_local, this is sslocal
-        self._is_local = is_local
+        self._terminal_type = terminal_type
         self._stage = STAGE_INIT
         self._encryptor = encrypt.Encryptor(config['password'],
                                             config['method'])
@@ -121,7 +124,7 @@ class TCPRelayHandler(object):
             self._forbidden_iplist = config['forbidden_ip']
         else:
             self._forbidden_iplist = None
-        if is_local:
+        if terminal_type == TerminalType.TerminalType.Local:
             self._chosen_server = self._get_a_server()
         fd_to_handlers[local_sock.fileno()] = self
         local_sock.setblocking(False)
@@ -225,10 +228,10 @@ class TCPRelayHandler(object):
         return True
 
     def _handle_stage_connecting(self, data):
-        if self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Local:
             data = self._encryptor.encrypt(data)
         self._data_to_write_to_remote.append(data)
-        if self._is_local and not self._fastopen_connected and \
+        if self._terminal_type == TerminalType.TerminalType.Local and not self._fastopen_connected and \
                 self._config['fast_open']:
             # for sslocal and fastopen, we basically wait for data and use
             # sendto to connect
@@ -264,7 +267,7 @@ class TCPRelayHandler(object):
 
     def _handle_stage_addr(self, data):
         try:
-            if self._is_local:
+            if self._terminal_type == TerminalType.TerminalType.Local:
                 cmd = common.ord(data[1])
                 if cmd == CMD_UDP_ASSOCIATE:
                     logging.debug('UDP associate')
@@ -299,7 +302,7 @@ class TCPRelayHandler(object):
             # pause reading
             self._update_stream(STREAM_UP, WAIT_STATUS_WRITING)
             self._stage = STAGE_DNS
-            if self._is_local:
+            if self._terminal_type == TerminalType.TerminalType.Local:
                 # forward address to remote
                 self._write_to_sock((b'\x05\x00\x00\x01'
                                      b'\x00\x00\x00\x00\x10\x10'),
@@ -351,12 +354,12 @@ class TCPRelayHandler(object):
                 try:
                     self._stage = STAGE_CONNECTING
                     remote_addr = ip
-                    if self._is_local:
+                    if self._terminal_type == TerminalType.TerminalType.Local:
                         remote_port = self._chosen_server[1]
                     else:
                         remote_port = self._remote_address[1]
 
-                    if self._is_local and self._config['fast_open']:
+                    if self._terminal_type == TerminalType.TerminalType.Local and self._config['fast_open']:
                         # for fastopen:
                         # wait for more data to arrive and send them in one SYN
                         self._stage = STAGE_CONNECTING
@@ -392,7 +395,6 @@ class TCPRelayHandler(object):
         self._update_activity()
         if not self._local_sock:
             return
-        is_local = self._is_local
         data = None
         try:
             data = self._local_sock.recv(BUF_SIZE)
@@ -403,24 +405,25 @@ class TCPRelayHandler(object):
         if not data:
             self.destroy()
             return
-        if not is_local:
+        if self._terminal_type == TerminalType.TerminalType.Server:
             data = self._encryptor.decrypt(data)
             if not data:
                 return
+        print("Received from local:", str(data))
         if self._stage == STAGE_STREAM:
-            if self._is_local:
+            if self._terminal_type == TerminalType.TerminalType.Local:
                 data = self._encryptor.encrypt(data)
             self._write_to_sock(data, self._remote_sock)
             return
-        elif is_local and self._stage == STAGE_INIT:
+        elif self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_INIT:
             # TODO check auth method
             self._write_to_sock(b'\x05\00', self._local_sock)
             self._stage = STAGE_ADDR
             return
         elif self._stage == STAGE_CONNECTING:
             self._handle_stage_connecting(data)
-        elif (is_local and self._stage == STAGE_ADDR) or \
-                (not is_local and self._stage == STAGE_INIT):
+        elif (self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_ADDR) or \
+                (not self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_INIT):
             self._handle_stage_addr(data)
 
     def _on_remote_read(self):
@@ -436,10 +439,18 @@ class TCPRelayHandler(object):
         if not data:
             self.destroy()
             return
-        if self._is_local:
+        if self._terminal_type == TerminalType.TerminalType.Local:
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
+        print("Received from remote:", str(data))
+        slitted_data = data.split(b"\r\n\r\n")
+        for field in slitted_data:
+            print(field)
+            try:
+                print(zlib.decompress(field))
+            except Exception as e:
+                print(e)
         try:
             self._write_to_sock(data, self._local_sock)
         except Exception as e:
@@ -454,6 +465,7 @@ class TCPRelayHandler(object):
         if self._data_to_write_to_local:
             data = b''.join(self._data_to_write_to_local)
             self._data_to_write_to_local = []
+            print("Write to local:", str(data))
             self._write_to_sock(data, self._local_sock)
         else:
             self._update_stream(STREAM_DOWN, WAIT_STATUS_READING)
@@ -550,9 +562,9 @@ class TCPRelayHandler(object):
 
 
 class TCPRelay(object):
-    def __init__(self, config, dns_resolver, is_local):
+    def __init__(self, config, dns_resolver, terminal_type):
         self._config = config
-        self._is_local = is_local
+        self._terminal_type = terminal_type
         self._dns_resolver = dns_resolver
         self._closed = False
         self._eventloop = None
@@ -562,10 +574,10 @@ class TCPRelay(object):
         self._timeout = config['timeout']
         self._timeouts = []  # a list for all the handlers
         # we trim the timeouts once a while
-        self._timeout_offset = 0   # last checked position for timeout
+        self._timeout_offset = 0  # last checked position for timeout
         self._handler_to_timeouts = {}  # key: handler value: index in timeouts
 
-        if is_local:
+        if terminal_type == TerminalType.TerminalType.Local:
             listen_addr = config['local_address']
             listen_port = config['local_port']
         else:
@@ -674,7 +686,7 @@ class TCPRelay(object):
                     conn = self._server_socket.accept()
                     TCPRelayHandler(self, self._fd_to_handlers,
                                     self._eventloop, conn[0], self._config,
-                                    self._dns_resolver, self._is_local)
+                                    self._dns_resolver, self._terminal_type)
                 except (OSError, IOError) as e:
                     error_no = eventloop.errno_from_exception(e)
                     if error_no in (errno.EAGAIN, errno.EINPROGRESS,
