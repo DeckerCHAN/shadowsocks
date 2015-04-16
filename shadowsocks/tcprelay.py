@@ -27,9 +27,9 @@ import traceback
 import random
 import zlib
 import re
-import utils.httpresolver.Request
+import utils.flow_resolver.object
 
-from shadowsocks import encrypt, eventloop, shell, common, TerminalType
+from shadowsocks import encrypt, eventloop, shell, common, terminal, protocol
 from shadowsocks.common import parse_header
 
 # we clear at most TIMEOUTS_CLEAN_SIZE timeouts each time
@@ -100,6 +100,8 @@ class TCPRelayHandler(object):
     def __init__(self, server, fd_to_handlers, loop, local_sock, config,
                  dns_resolver, terminal_type):
         self._server = server
+        self._protocol_type = protocol.ProtocolType.TCP
+        self._protocol_entity = None
         self._fd_to_handlers = fd_to_handlers
         self._loop = loop
         self._local_sock = local_sock
@@ -124,7 +126,7 @@ class TCPRelayHandler(object):
             self._forbidden_iplist = config['forbidden_ip']
         else:
             self._forbidden_iplist = None
-        if terminal_type == TerminalType.TerminalType.Local:
+        if terminal_type == terminal.TerminalType.Local:
             self._chosen_server = self._get_a_server()
         fd_to_handlers[local_sock.fileno()] = self
         local_sock.setblocking(False)
@@ -228,10 +230,10 @@ class TCPRelayHandler(object):
         return True
 
     def _handle_stage_connecting(self, data):
-        if self._terminal_type == TerminalType.TerminalType.Local:
+        if self._terminal_type == terminal.TerminalType.Local:
             data = self._encryptor.encrypt(data)
         self._data_to_write_to_remote.append(data)
-        if self._terminal_type == TerminalType.TerminalType.Local and not self._fastopen_connected and \
+        if self._terminal_type == terminal.TerminalType.Local and not self._fastopen_connected and \
                 self._config['fast_open']:
             # for sslocal and fastopen, we basically wait for data and use
             # sendto to connect
@@ -267,7 +269,7 @@ class TCPRelayHandler(object):
 
     def _handle_stage_addr(self, data):
         try:
-            if self._terminal_type == TerminalType.TerminalType.Local:
+            if self._terminal_type == terminal.TerminalType.Local:
                 cmd = common.ord(data[1])
                 if cmd == CMD_UDP_ASSOCIATE:
                     logging.debug('UDP associate')
@@ -302,7 +304,7 @@ class TCPRelayHandler(object):
             # pause reading
             self._update_stream(STREAM_UP, WAIT_STATUS_WRITING)
             self._stage = STAGE_DNS
-            if self._terminal_type == TerminalType.TerminalType.Local:
+            if self._terminal_type == terminal.TerminalType.Local:
                 # forward address to remote
                 self._write_to_sock((b'\x05\x00\x00\x01'
                                      b'\x00\x00\x00\x00\x10\x10'),
@@ -354,12 +356,12 @@ class TCPRelayHandler(object):
                 try:
                     self._stage = STAGE_CONNECTING
                     remote_addr = ip
-                    if self._terminal_type == TerminalType.TerminalType.Local:
+                    if self._terminal_type == terminal.TerminalType.Local:
                         remote_port = self._chosen_server[1]
                     else:
                         remote_port = self._remote_address[1]
 
-                    if self._terminal_type == TerminalType.TerminalType.Local and self._config['fast_open']:
+                    if self._terminal_type == terminal.TerminalType.Local and self._config['fast_open']:
                         # for fastopen:
                         # wait for more data to arrive and send them in one SYN
                         self._stage = STAGE_CONNECTING
@@ -405,25 +407,33 @@ class TCPRelayHandler(object):
         if not data:
             self.destroy()
             return
-        if self._terminal_type == TerminalType.TerminalType.Server:
+        if self._terminal_type == terminal.TerminalType.Server:
             data = self._encryptor.decrypt(data)
             if not data:
                 return
         print("Received from local:", str(data))
+        try:
+            request = utils.flow_resolver.object.HttpObject(data)
+            self._protocol_type = protocol.ProtocolType.HTTP
+            del request.headers[b'Accept-Encoding']
+            data = request.to_binary()
+        except Exception as e:
+            print(e)
+
         if self._stage == STAGE_STREAM:
-            if self._terminal_type == TerminalType.TerminalType.Local:
+            if self._terminal_type == terminal.TerminalType.Local:
                 data = self._encryptor.encrypt(data)
             self._write_to_sock(data, self._remote_sock)
             return
-        elif self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_INIT:
+        elif self._terminal_type == terminal.TerminalType.Local and self._stage == STAGE_INIT:
             # TODO check auth method
             self._write_to_sock(b'\x05\00', self._local_sock)
             self._stage = STAGE_ADDR
             return
         elif self._stage == STAGE_CONNECTING:
             self._handle_stage_connecting(data)
-        elif (self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_ADDR) or \
-                (not self._terminal_type == TerminalType.TerminalType.Local and self._stage == STAGE_INIT):
+        elif (self._terminal_type == terminal.TerminalType.Local and self._stage == STAGE_ADDR) or \
+                (not self._terminal_type == terminal.TerminalType.Local and self._stage == STAGE_INIT):
             self._handle_stage_addr(data)
 
     def _on_remote_read(self):
@@ -433,24 +443,42 @@ class TCPRelayHandler(object):
         try:
             data = self._remote_sock.recv(BUF_SIZE)
         except (OSError, IOError) as e:
-            if eventloop.errno_from_exception(e) in \
-                    (errno.ETIMEDOUT, errno.EAGAIN, errno.EWOULDBLOCK):
+            if eventloop.errno_from_exception(e) in (errno.ETIMEDOUT, errno.EAGAIN, errno.EWOULDBLOCK):
                 return
         if not data:
             self.destroy()
             return
-        if self._terminal_type == TerminalType.TerminalType.Local:
+        if self._terminal_type == terminal.TerminalType.Local:
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
-        print("Received from remote:", str(data))
-        slitted_data = data.split(b"\r\n\r\n")
-        for field in slitted_data:
-            print(field)
-            try:
-                print(zlib.decompress(field))
-            except Exception as e:
-                print(e)
+        # print("Received from remote:", str(data))
+        # if I detected protocol
+        # I may start to change something at here
+        print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+        print(data)
+        if self._protocol_type == protocol.ProtocolType.HTTP:
+            if not self._protocol_entity:
+                try:
+                    request = utils.flow_resolver.object.HttpObject(data)
+                    self._protocol_entity = request
+                    return
+                except Exception as e:
+                    print("This stream is not a text/html")
+
+            if b'Content-Type' in self._protocol_entity.headers and b'text/html' in self._protocol_entity.headers[b'Content-Type']:
+                if not self._protocol_entity.is_finished():
+                    self._protocol_entity.append_body(data)
+                    if self._protocol_entity.is_finished():
+                        pass
+                    else:
+                        return
+
+                self._protocol_entity.headers[b'Transfer-Encoding'] = b''
+                self._protocol_entity.headers[b'Content-Length'] = str(len(self._protocol_entity.body)).encode()
+                data = self._protocol_entity.to_binary()
+
+
         try:
             self._write_to_sock(data, self._local_sock)
         except Exception as e:
@@ -577,7 +605,7 @@ class TCPRelay(object):
         self._timeout_offset = 0  # last checked position for timeout
         self._handler_to_timeouts = {}  # key: handler value: index in timeouts
 
-        if terminal_type == TerminalType.TerminalType.Local:
+        if terminal_type == terminal.TerminalType.Local:
             listen_addr = config['local_address']
             listen_port = config['local_port']
         else:
