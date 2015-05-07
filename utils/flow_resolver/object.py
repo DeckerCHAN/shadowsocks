@@ -42,6 +42,11 @@ class HttpObject(object):
         stream = stream.__add__(self.body)
         return stream
 
+    def to_common_binary(self):
+        self.headers[b'Transfer-Encoding'] = b''
+        self.headers[b'Content-Length'] = str(len(self.body)).encode()
+        return self.to_binary()
+
     def is_finished(self):
         return self.finished
 

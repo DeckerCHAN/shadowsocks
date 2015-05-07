@@ -25,12 +25,12 @@ import struct
 import logging
 import traceback
 import random
-import zlib
-import re
-import utils.flow_resolver.object
 
-from shadowsocks import encrypt, eventloop, shell, common, terminal, protocol
+import utils.flow_resolver.object
+from shadowsocks import encrypt, eventloop, shell, common, terminal
+from utils.flow_resolver import protocol, content
 from shadowsocks.common import parse_header
+
 
 # we clear at most TIMEOUTS_CLEAN_SIZE timeouts each time
 TIMEOUTS_CLEAN_SIZE = 512
@@ -101,7 +101,9 @@ class TCPRelayHandler(object):
                  dns_resolver, terminal_type):
         self._server = server
         self._protocol_type = protocol.ProtocolType.TCP
-        self._protocol_entity = None
+        self._protocol_request = None
+        self._protocol_response = None
+        self._content_type = None
         self._fd_to_handlers = fd_to_handlers
         self._loop = loop
         self._local_sock = local_sock
@@ -415,7 +417,11 @@ class TCPRelayHandler(object):
         try:
             request = utils.flow_resolver.object.HttpObject(data)
             self._protocol_type = protocol.ProtocolType.HTTP
+            if b'cpro.baidustatic.com' in request.headers[b'Host']:
+                self.destroy()
+                return
             del request.headers[b'Accept-Encoding']
+            self._protocol_request = request
             data = request.to_binary()
         except Exception as e:
             print(e)
@@ -452,35 +458,45 @@ class TCPRelayHandler(object):
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
-        # print("Received from remote:", str(data))
-        # if I detected protocol
-        # I may start to change something at here
-        print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-        print(data)
-        if self._protocol_type == protocol.ProtocolType.HTTP:
-            if not self._protocol_entity:
-                try:
-                    request = utils.flow_resolver.object.HttpObject(data)
-                    self._protocol_entity = request
-                    return
-                except Exception as e:
-                    print("This stream is not a text/html")
-
-            if b'Content-Type' in self._protocol_entity.headers and b'text/html' in self._protocol_entity.headers[b'Content-Type']:
-                if not self._protocol_entity.is_finished():
-                    self._protocol_entity.append_body(data)
-                    if self._protocol_entity.is_finished():
-                        pass
-                    else:
+        print("Received from remote:", str(data))
+        try:
+            # if I detected protocol
+            # I may start to change something at here
+            if self._protocol_type == protocol.ProtocolType.HTTP:
+                if not self._content_type:
+                    try:
+                        response = utils.flow_resolver.object.HttpObject(data)
+                        if b'Content-Type' in response.headers and b'text/html' in response.headers[b'Content-Type']:
+                            self._content_type = content.ContentType.HTML
+                    except Exception as e:
+                        print("This stream is not a HTTP response")
+                        self._protocol_type = protocol.ProtocolType.UNKNOWN
+                        self._content_type = content.ContentType.UNKNOWN
+                        self._write_to_sock(data, self._local_sock)
                         return
 
-                self._protocol_entity.headers[b'Transfer-Encoding'] = b''
-                self._protocol_entity.headers[b'Content-Length'] = str(len(self._protocol_entity.body)).encode()
-                data = self._protocol_entity.to_binary()
+                if self._content_type == content.ContentType.HTML:
+                    if self._protocol_response is None:
+                        self._protocol_response = utils.flow_resolver.object.HttpObject(data)
+                        if self._protocol_response.is_finished():
+                            data = self._protocol_response.to_common_binary()
+                            self._write_to_sock(data, self._local_sock)
+                            self.destroy()
+                            return
+                        else:
+                            return
+                    else:
+                        self._protocol_response.append_body(data)
+                        if self._protocol_response.is_finished():
+                            data = self._protocol_response.to_common_binary()
+                            self._write_to_sock(data, self._local_sock)
+                            self.destroy()
+                            return
+                        else:
+                            return
 
-
-        try:
             self._write_to_sock(data, self._local_sock)
+
         except Exception as e:
             shell.print_exception(e)
             if self._config['verbose']:
