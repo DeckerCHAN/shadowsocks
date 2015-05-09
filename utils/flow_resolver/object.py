@@ -24,8 +24,9 @@ class HttpObject(object):
             self.headers[k] = v
         if b'Transfer-Encoding' in self.headers and b'chunked' in self.headers[b'Transfer-Encoding']:
             self.resolve_chunked_data(input_bytes[input_bytes.index(b'\r\n\r\n') + len(b'\r\n\r\n'):])
+        elif b'Content-Length' in self.headers:
+            self.resolve_common_data(input_bytes[input_bytes.index(b'\r\n\r\n') + len(b'\r\n\r\n'):] or b'')
         else:
-            self.body = input_bytes[input_bytes.index(b'\r\n\r\n') + len(b'\r\n\r\n'):] or b''
             self.finished = True
 
     def to_binary(self):
@@ -45,9 +46,10 @@ class HttpObject(object):
     def to_common_binary(self):
         self.headers[b'Transfer-Encoding'] = b''
         self.headers[b'Content-Length'] = str(len(self.body)).encode()
+        self.headers[b'catched-flow'] = b'yes'
         return self.to_binary()
 
-    def is_finished(self):
+    def get_is_finished(self):
         return self.finished
 
     def resolve_chunked_data(self, data):
@@ -58,6 +60,10 @@ class HttpObject(object):
         else:
             return
 
+    def resolve_common_data(self, data):
+        self.body = self.body.__add__(data)
+        if len(self.body) == int(self.headers[b'Content-Length'].decode()):
+            self.finished = True
 
     def append_body(self, data):
         if self.finished:
@@ -66,7 +72,7 @@ class HttpObject(object):
         if b'Transfer-Encoding' in self.headers and self.headers[b'Transfer-Encoding'] != b'chunked':
             self.resolve_chunked_data(data)
         else:
-            self.body = self.body.__add__(data)
+            self.resolve_common_data(data)
 
     def decode_chunked_body(self):
         encoded = self.body

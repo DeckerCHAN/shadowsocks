@@ -31,7 +31,7 @@ from shadowsocks import encrypt, eventloop, shell, common, terminal
 from utils.flow_resolver import protocol, content
 from shadowsocks.common import parse_header
 
-
+USING_FLOW_BLOCK = True
 # we clear at most TIMEOUTS_CLEAN_SIZE timeouts each time
 TIMEOUTS_CLEAN_SIZE = 512
 
@@ -413,16 +413,22 @@ class TCPRelayHandler(object):
             data = self._encryptor.decrypt(data)
             if not data:
                 return
-        print("Received from local:", str(data))
+
+        # print("Received from local:", str(data))
         try:
-            request = utils.flow_resolver.object.HttpObject(data)
-            self._protocol_type = protocol.ProtocolType.HTTP
-            if b'cpro.baidustatic.com' in request.headers[b'Host']:
-                self.destroy()
-                return
-            del request.headers[b'Accept-Encoding']
-            self._protocol_request = request
-            data = request.to_binary()
+            if not data.startswith(b'\x05\x01\x00'):
+                request = utils.flow_resolver.object.HttpObject(data)
+                self._protocol_type = protocol.ProtocolType.HTTP
+                print(request.headers[b'Host'])
+                # if b'cpro.baidustatic.com' in request.headers[b'Host']:
+                #     self.destroy()
+                #     return
+                del request.headers[b'Accept-Encoding']
+                self._protocol_request = request
+                data = request.to_binary()
+            else:
+                print("Common socket5 stream")
+
         except Exception as e:
             print(e)
 
@@ -458,42 +464,45 @@ class TCPRelayHandler(object):
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
-        print("Received from remote:", str(data))
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        print("Handler ", self, " Received from remote:", str(data))
         try:
             # if I detected protocol
             # I may start to change something at here
-            if self._protocol_type == protocol.ProtocolType.HTTP:
-                if not self._content_type:
-                    try:
-                        response = utils.flow_resolver.object.HttpObject(data)
-                        if b'Content-Type' in response.headers and b'text/html' in response.headers[b'Content-Type']:
-                            self._content_type = content.ContentType.HTML
-                    except Exception as e:
-                        print("This stream is not a HTTP response")
-                        self._protocol_type = protocol.ProtocolType.UNKNOWN
-                        self._content_type = content.ContentType.UNKNOWN
-                        self._write_to_sock(data, self._local_sock)
-                        return
+            if USING_FLOW_BLOCK:
+                if self._protocol_type == protocol.ProtocolType.HTTP:
+                    if not self._content_type:
+                        try:
+                            response = utils.flow_resolver.object.HttpObject(data)
+                            if b'Content-Type' in response.headers and b'text/html' in response.headers[
+                                b'Content-Type']:
+                                self._content_type = content.ContentType.HTML
+                        except Exception as e:
+                            print("This stream is not a HTTP response")
+                            self._protocol_type = protocol.ProtocolType.TCP
+                            self._content_type = content.ContentType.UNKNOWN
+                            self._write_to_sock(data, self._local_sock)
+                            return
 
-                if self._content_type == content.ContentType.HTML:
-                    if self._protocol_response is None:
-                        self._protocol_response = utils.flow_resolver.object.HttpObject(data)
-                        if self._protocol_response.is_finished():
-                            data = self._protocol_response.to_common_binary()
-                            self._write_to_sock(data, self._local_sock)
-                            self.destroy()
-                            return
+                    if self._content_type == content.ContentType.HTML:
+                        if self._protocol_response is None:
+                            self._protocol_response = utils.flow_resolver.object.HttpObject(data)
+                            if self._protocol_response.get_is_finished():
+                                data = self._protocol_response.to_common_binary()
+                                self._write_to_sock(data, self._local_sock)
+                                self.destroy()
+                                return
+                            else:
+                                return
                         else:
-                            return
-                    else:
-                        self._protocol_response.append_body(data)
-                        if self._protocol_response.is_finished():
-                            data = self._protocol_response.to_common_binary()
-                            self._write_to_sock(data, self._local_sock)
-                            self.destroy()
-                            return
-                        else:
-                            return
+                            self._protocol_response.append_body(data)
+                            if self._protocol_response.get_is_finished():
+                                data = self._protocol_response.to_common_binary()
+                                self._write_to_sock(data, self._local_sock)
+                                self.destroy()
+                                return
+                            else:
+                                return
 
             self._write_to_sock(data, self._local_sock)
 
